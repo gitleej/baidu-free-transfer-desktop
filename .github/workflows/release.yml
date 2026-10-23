@@ -31,4 +31,13 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME release\BaiduFreeTransfer.exe release\SHA256SUMS.txt --generate-notes --title "Baidu Free Transfer $env:GITHUB_REF_NAME"
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @("release\BaiduFreeTransfer.exe", "release\SHA256SUMS.txt")
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
+          }
+          else {
+            gh release create $tag @assets --generate-notes --title "Baidu Free Transfer $tag" --repo $env:GITHUB_REPOSITORY
+          }
