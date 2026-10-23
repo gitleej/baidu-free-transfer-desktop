@@ -1,2 +1,3 @@
 aiohttp
 pyyaml
+pygame-ce>=2.5,<3

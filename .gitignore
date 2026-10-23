@@ -1,4 +1,13 @@
-.vscode/
-baidu_free_transfer.egg-info/
-*.pyc
-*.yaml
+.build-venv/
+.conda-env/
+.venv/
+build/
+dist/
+release/
+*.spec
+*.log
+config.yaml
+__pycache__/
+*.py[cod]
+.pytest_cache/
+assets/app.ico

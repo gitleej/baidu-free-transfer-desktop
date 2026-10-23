@@ -2,17 +2,13 @@
 
 import argparse
 import asyncio
-import logging
-import os
-import sys
-import urllib.parse
 
-import yaml
-
-from . import apis, transfer, utils
+from . import utils
+from .runner import TransferJob, configure_logging, run_transfer
+from .settings import TransferSettings
 
 
-async def main():
+async def async_main():
     parser = argparse.ArgumentParser(
         prog="baidutransfer", description="Baidu yunpan free transfer tool"
     )
@@ -25,61 +21,61 @@ async def main():
     )
     parser.add_argument("-C", "--cookie", help="cookie of pan.baidu.com")
     parser.add_argument("-p", "--password", help="share password")
+    parser.add_argument(
+        "-d",
+        "--destination",
+        default="",
+        help="destination directory in your netdisk, e.g. /paper-patterns",
+    )
+    parser.add_argument(
+        "--resume-path",
+        help="full destination directory at which an interrupted transfer resumes",
+    )
+    parser.add_argument("--max-files", type=int, default=500)
+    parser.add_argument("--request-interval-min", type=int, default=30)
+    parser.add_argument("--request-interval-max", type=int, default=60)
+    parser.add_argument("--rest-after-min", type=int, default=10)
+    parser.add_argument("--rest-after-max", type=int, default=20)
+    parser.add_argument("--rest-duration-min", type=int, default=60)
+    parser.add_argument("--rest-duration-max", type=int, default=300)
+    parser.add_argument("--max-retries", type=int, default=10)
+    parser.add_argument("--http-total-timeout", type=int, default=60)
+    parser.add_argument("--http-connect-timeout", type=int, default=15)
+    parser.add_argument("--http-read-timeout", type=int, default=45)
 
     args = parser.parse_args()
-    url = urllib.parse.urlparse(args.url)
-    share_key = ""
-    if url.hostname == "pan.baidu.com":
-        if url.path.startswith("/s/1"):
-            share_key = url.path.split("/")[-1][1:]
-        elif url.path == "/share/init":
-            share_key = url.query.split("=", 1)[1]
-
-        if url.query:
-            for item in url.query.split('&'):
-                key, val = item.split("=", 1)
-                if key == "pwd":
-                    args.password = val
-                    break
-
-    if not share_key:
-        print("Invalid url %s" % args.url, file=sys.stderr)
-        return -1
-
-    cookie = None
-    if os.path.isfile(args.config):
-        with open(args.config) as fp:
-            config = yaml.safe_load(fp.read())
-            if "cookie" in config:
-                cookie = config["cookie"]
-    if args.cookie:
-        cookie = args.cookie
-    if not cookie:
-        print(
-            "Please provide pan.baidu.com cookie from `-c config.yaml` or `-C cookie` argument",
-            file=sys.stderr,
-        )
-        return -1
-
-    utils.logger.level = logging.INFO
-    handler = logging.StreamHandler()
-    fmt = "[%(asctime)s][%(levelname)s]%(message)s"
-    formatter = logging.Formatter(fmt)
-    handler.setFormatter(formatter)
-    utils.logger.propagate = 0
-    utils.logger.addHandler(handler)
-
-    api = apis.BaiduYunPanAPI(cookie)
-    bft = transfer.BaiduFileTransfer(api, share_key, args.password)
+    configure_logging()
+    settings = TransferSettings(
+        max_files_per_request=args.max_files,
+        request_interval_min=args.request_interval_min,
+        request_interval_max=args.request_interval_max,
+        rest_after_min_requests=args.rest_after_min,
+        rest_after_max_requests=args.rest_after_max,
+        rest_duration_min=args.rest_duration_min,
+        rest_duration_max=args.rest_duration_max,
+        max_retries=args.max_retries,
+        http_total_timeout=args.http_total_timeout,
+        http_connect_timeout=args.http_connect_timeout,
+        http_read_timeout=args.http_read_timeout,
+    )
+    job = TransferJob(
+        share_url=args.url,
+        cookie=args.cookie or "",
+        config_path=args.config,
+        password=args.password or "",
+        destination=args.destination,
+        resume_path=args.resume_path or "",
+    )
     try:
-        await bft.init_share_data()
-    except utils.BaiduYunPanResourceNotFoundError:
-        utils.logger.error("Resource %s has been expired" % args.url)
-    else:
-        await bft.transfer()
+        await run_transfer(job, settings)
+    except (ValueError, RuntimeError) as exc:
+        utils.logger.error(str(exc))
+        return -1
+
+
+def main():
+    return asyncio.run(async_main())
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-    loop.close()
+    raise SystemExit(main() or 0)

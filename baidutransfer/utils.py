@@ -69,7 +69,7 @@ class TransferLimitExceededError(RuntimeError):
         self._count = count
 
     def __str__(self):
-        return "TransferLimitExceededError: limit=%d count=%d" % (
+        return "TransferLimitExceededError: limit=%s count=%s" % (
             self._limit,
             self._count,
         )
@@ -84,6 +84,9 @@ async def http_request(
     params=None,
     data=None,
     raise_for_status=True,
+    timeout_total=60,
+    timeout_connect=15,
+    timeout_read=45,
 ):
     headers = headers or {}
     headers["User-Agent"] = USER_AGENT
@@ -93,7 +96,12 @@ async def http_request(
         headers["Cookie"] = cookie
     proxy = os.environ.get("https_proxy")
     async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(verify_ssl=False)
+        connector=aiohttp.TCPConnector(verify_ssl=False),
+        timeout=aiohttp.ClientTimeout(
+            total=timeout_total,
+            connect=timeout_connect,
+            sock_read=timeout_read,
+        ),
     ) as session:
         func = getattr(session, method)
         async with func(

@@ -25,13 +25,14 @@ def find_packages():
 setuptools.setup(
     author="drunkdream",
     author_email="drunkdream@qq.com",
+    maintainer="gitleej",
     name="baidu-free-transfer",
     license="MIT",
     description="Baidu yunpan transfer tool.",
     version=baidutransfer.VERSION,
     long_description=README,
     long_description_content_type="text/markdown",
-    url="https://github.com/drunkdream/baidu-free-transfer",
+    url="https://github.com/gitleej/baidu-free-transfer-desktop",
     packages=find_packages(),
     python_requires=">=3.7",
     install_requires=REQUIREMENTS,
@@ -53,6 +54,7 @@ setuptools.setup(
     entry_points={
         "console_scripts": [
             "baidu-transfer = baidutransfer.__main__:main",
+            "baidu-transfer-gui = baidutransfer.gui:main",
         ],
     },
 )
