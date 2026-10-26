@@ -80,8 +80,9 @@ class BaiduFileTransfer(object):
             "[%s] Transfer %d files under directory %s success"
             % (self.__class__.__name__, len(file_list), target_path)
         )
-    async def _count_share_directory_files(self, share_path, limit=None):
-        """Count recursively, stopping as soon as the limit is exceeded."""
+
+    async def _count_share_directory_items(self, share_path, limit=None):
+        """Count files and directory nodes, stopping above the limit."""
         if limit is None:
             limit = self._max_files_per_request
         dir_list, file_list = await self._api.list_share_dir(
@@ -101,23 +102,25 @@ class BaiduFileTransfer(object):
                 len(file_list),
             )
         )
-        file_count = len(file_list)
-        if file_count > limit:
-            return file_count
+        # Baidu expands directory nodes as well as files when enforcing the
+        # transfer limit.  Counting files alone underestimates nested trees.
+        item_count = 1 + len(file_list)
+        if item_count > limit:
+            return item_count
         for directory in dir_list:
             child_share_path = share_path.rstrip("/") + "/" + directory["name"]
-            remaining = limit - file_count
-            file_count += await self._count_share_directory_files(
+            remaining = limit - item_count
+            item_count += await self._count_share_directory_items(
                 child_share_path, limit=remaining
             )
-            if file_count > limit:
-                return file_count
-        return file_count
+            if item_count > limit:
+                return item_count
+        return item_count
 
-    async def _transfer_packed_batch(self, batch, target_path):
-        """Transfer whole source items, splitting only between items."""
+    async def _transfer_packed_batch(self, batch, target_path, defer_tail=False):
+        """Transfer whole source items and optionally defer a rejected tail."""
         if not batch:
-            return
+            return []
         try:
             await self._api.transfer(
                 self._user_id,
@@ -155,58 +158,69 @@ class BaiduFileTransfer(object):
                     child_dirs,
                     child_files,
                 )
-                return
+                return []
             midpoint = len(batch) // 2
+            action = (
+                "deferring the tail for repacking"
+                if defer_tail
+                else "splitting between items"
+            )
             utils.logger.info(
-                "[%s] Packed batch of %d source items exceeds the account limit; "
-                "splitting between items"
-                % (self.__class__.__name__, len(batch))
+                "[%s] Packed batch of %d source items exceeds the account limit; %s"
+                % (self.__class__.__name__, len(batch), action)
             )
             await self._transfer_packed_batch(batch[:midpoint], target_path)
+            if defer_tail:
+                return batch[midpoint:]
             await self._transfer_packed_batch(batch[midpoint:], target_path)
-            return
+            return []
 
         recursive_file_count = sum(entry["file_count"] for entry in batch)
+        recursive_item_count = sum(
+            entry.get("item_count", entry["file_count"]) for entry in batch
+        )
         utils.logger.info(
             "[%s] Transfer packed batch under directory %s success: "
-            "%d source items, %d recursive files"
+            "%d source items, %d recursive files, %d expanded items"
             % (
                 self.__class__.__name__,
                 target_path,
                 len(batch),
                 recursive_file_count,
+                recursive_item_count,
             )
         )
+        return []
 
     async def transfer_packed_items(self, entries, target_path):
         """Pack whole files/directories up to about 500 recursive files."""
         if target_path:
             await self._api.create_directory(target_path)
 
-        max_file_count = self._max_files_per_request
+        max_item_count = self._max_files_per_request
         max_source_items = self._max_files_per_request
         batch = []
-        batch_file_count = 0
+        batch_item_count = 0
 
         for entry in entries:
-            entry_file_count = entry["file_count"]
+            entry_item_count = entry.get("item_count", entry["file_count"])
             would_overflow = batch and (
-                batch_file_count + entry_file_count > max_file_count
+                batch_item_count + entry_item_count > max_item_count
                 or len(batch) >= max_source_items
             )
             if would_overflow:
                 await self._transfer_packed_batch(batch, target_path)
                 batch = []
-                batch_file_count = 0
+                batch_item_count = 0
 
-            # A directory larger than 500 files is submitted alone.  It is
-            # never recursively split merely to fill a batch.
-            if entry_file_count > max_file_count:
+            # A directory larger than the expanded-item limit is submitted
+            # alone. It is never recursively split merely to fill a batch.
+            if entry_item_count > max_item_count:
                 await self._transfer_packed_batch([entry], target_path)
                 continue
 
             batch.append(entry)
-            batch_file_count += entry_file_count
+            batch_item_count += entry_item_count
 
         if batch:
             await self._transfer_packed_batch(batch, target_path)
@@ -390,10 +404,15 @@ class BaiduFileTransfer(object):
             )
 
         packed_entries = [
-            {"item": item, "file_count": 1, "is_directory": False}
+            {
+                "item": item,
+                "file_count": 1,
+                "item_count": 1,
+                "is_directory": False,
+            }
             for item in missing_files
         ]
-        packed_file_count = len(packed_entries)
+        packed_item_count = len(packed_entries)
 
         # Flush full groups of loose files immediately.  Directory counting is
         # then streamed one directory at a time so a large tree does not need a
@@ -403,7 +422,7 @@ class BaiduFileTransfer(object):
                 packed_entries[: self._max_files_per_request], target_path
             )
             packed_entries = packed_entries[self._max_files_per_request :]
-            packed_file_count = len(packed_entries)
+            packed_item_count = len(packed_entries)
 
         for directory in missing_dirs:
             child_share_path = share_path.rstrip("/") + "/" + directory["name"]
@@ -416,32 +435,37 @@ class BaiduFileTransfer(object):
                     target_path.rstrip("/") + "/" + directory["name"],
                 )
             )
-            recursive_file_count = await self._count_share_directory_files(
+            recursive_item_count = await self._count_share_directory_items(
                 child_share_path, limit=self._max_files_per_request
             )
+            recursive_file_count = self._count_scan_files
             entry = {
                 "item": directory,
                 "file_count": recursive_file_count,
+                "item_count": recursive_item_count,
                 "is_directory": True,
                 "share_path": child_share_path,
             }
             utils.logger.info(
-                "[%s] Counted directory %s: %d recursive files"
+                "[%s] Counted directory %s: %d recursive files, "
+                "%d expanded items"
                 % (
                     self.__class__.__name__,
                     target_path.rstrip("/") + "/" + directory["name"],
                     recursive_file_count,
+                    recursive_item_count,
                 )
             )
 
-            if recursive_file_count > self._max_files_per_request:
+            if recursive_item_count > self._max_files_per_request:
                 if packed_entries:
                     await self._transfer_packed_batch(packed_entries, target_path)
                     packed_entries = []
-                    packed_file_count = 0
+                    packed_item_count = 0
                 child_target_path = target_path.rstrip("/") + "/" + directory["name"]
                 utils.logger.info(
-                    "[%s] Directory exceeds %d files; descending depth-first: %s"
+                    "[%s] Directory exceeds %d expanded items; "
+                    "descending depth-first: %s"
                     % (
                         self.__class__.__name__,
                         self._max_files_per_request,
@@ -462,16 +486,39 @@ class BaiduFileTransfer(object):
                 continue
 
             if packed_entries and (
-                packed_file_count + recursive_file_count
+                packed_item_count + recursive_item_count
                 > self._max_files_per_request
                 or len(packed_entries) >= self._max_files_per_request
             ):
-                await self._transfer_packed_batch(packed_entries, target_path)
-                packed_entries = []
-                packed_file_count = 0
+                # If Baidu still rejects a conservatively counted batch, keep
+                # the untransferred tail as the seed of the next batch so it
+                # can be filled with this and later whole directories.
+                packed_entries = await self._transfer_packed_batch(
+                    packed_entries, target_path, defer_tail=True
+                )
+                packed_item_count = sum(
+                    pending.get("item_count", pending["file_count"])
+                    for pending in packed_entries
+                )
+
+                while packed_entries and (
+                    packed_item_count + recursive_item_count
+                    > self._max_files_per_request
+                    or len(packed_entries) >= self._max_files_per_request
+                ):
+                    pending_before = len(packed_entries)
+                    packed_entries = await self._transfer_packed_batch(
+                        packed_entries, target_path, defer_tail=True
+                    )
+                    packed_item_count = sum(
+                        pending.get("item_count", pending["file_count"])
+                        for pending in packed_entries
+                    )
+                    if len(packed_entries) == pending_before:
+                        raise RuntimeError("Unable to reduce an over-limit packed batch")
 
             packed_entries.append(entry)
-            packed_file_count += recursive_file_count
+            packed_item_count += recursive_item_count
 
         if packed_entries:
             await self._transfer_packed_batch(packed_entries, target_path)
